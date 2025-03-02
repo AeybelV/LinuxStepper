@@ -51,15 +51,103 @@ struct stepper_motor_device
     stepper_direction direction;
 };
 
+static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer);
+
+/**
+ * @brief Timer callback, toggles the STEP pin ad decrement the remaining steps
+ *
+ * @param timer htimer object
+ * @return error code
+ */
+static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer)
+{
+    struct stepper_motor_device *sd = container_of(timer, struct stepper_motor_device, timer);
+    dev_info(sd->dev, "Timer callback\n");
+
+    // If we stopped stepping through a halt or run out remaining steps, we are done
+    if (!sd->stepping || (sd->remaining == 0))
+    {
+        dev_info(sd->dev, "Completed movement\n");
+        sd->stepping = false;
+
+        // Makes sure STEP is driven low
+        if (sd->step_gpiod)
+            gpiod_set_value(sd->step_gpiod, 0);
+
+        return HRTIMER_NORESTART;
+    }
+
+    // Toggle steps
+    sd->step_pin_state = !sd->step_pin_state;
+    if (sd->step_gpiod)
+        gpiod_set_value(sd->step_gpiod, sd->step_pin_state);
+
+    // Counts step done on rising edge
+    if (sd->step_pin_state)
+    {
+        sd->remaining--;
+    }
+
+    // Schedule the next pulse
+    hrtimer_forward_now(timer, sd->step_period);
+    return HRTIMER_RESTART;
+}
+
 /**
  * @brief Function to start a movement given the parametes for the move.
  *
  * @param sd Device private data
  * @param movement destired movement
+ *
+ * @return error code
  */
-static void stepper_move(struct stepper_motor_device *sd, struct stepdrv_move movement)
+static int stepper_move(struct stepper_motor_device *sd, struct stepdrv_move movement)
 {
     dev_info(sd->dev, "Performing movement of stepper motor\n");
+
+    // Check if we have the required STEP/DIR lines
+    if (!sd->step_gpiod || !sd->dir_gpiod)
+    {
+        dev_err(sd->dev, "Unable to peform a movement. No STEP/DIR pins configured\n");
+        return -ENOTTY;
+    }
+
+    // Cancel any ongoing movement
+    // TODO: Maybe queue the movement instead?
+    sd->stepping = false;
+    hrtimer_cancel(&sd->timer);
+    sd->remaining = 0;
+
+    // Set direction line
+    gpiod_set_value(sd->dir_gpiod, movement.direction ? 1 : 0);
+    sd->direction = movement.direction;
+
+    unsigned int speed_hz = movement.speed_hz;
+    // Handle the scenario where speed_hz is zero to avoid dividing by zero. Force it to 1hz
+    if (movement.speed_hz == 0)
+        speed_hz = 1;
+
+    /*
+     * One approach:
+     *   - We do 1 step per "rising edge."
+     *   - Therefore step period = 1 / speed (in seconds).
+     *   - If speed=500 steps/sec => period=2ms => 2e6 ns
+     */
+    unsigned long long period_ns = 1000000000ULL / speed_hz;
+    sd->step_period = ktime_set(0, period_ns);
+
+    // Setup the move
+    sd->remaining = movement.steps;
+    sd->step_pin_state = false;
+    sd->stepping = true;
+
+    // Clear the step pin initially
+    gpiod_set_value(sd->step_gpiod, 0);
+
+    // Start the timer
+    hrtimer_start(&sd->timer, sd->step_period, HRTIMER_MODE_REL_PINNED);
+    // TODO: Handle errors better
+    return 0;
 }
 
 /**
@@ -94,6 +182,7 @@ static long stepper_ioctl(struct file *file, unsigned int cmd, unsigned long arg
     case STEPDRV_IOC_STOP: {
         sd->stepping = false;
         sd->remaining = 0;
+        hrtimer_cancel(&sd->timer);
         // Set STEP low to be safe
         if (sd->step_gpiod)
             gpiod_set_value(sd->step_gpiod, 0);
@@ -280,6 +369,12 @@ static int stepper_probe(struct platform_device *pdev)
     ret = stepper_parse_gpios(sd);
     if (ret)
         return ret;
+
+    // Init the hrtimer
+    sd->stepping = false;
+    sd->remaining = 0;
+    hrtimer_init(&sd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_PINNED);
+    sd->timer.function = stepper_timer_cb;
 
     // Create char device node
     dev_info(sd->dev, "Creating char device node\n");
