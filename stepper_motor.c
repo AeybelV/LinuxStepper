@@ -17,12 +17,17 @@
 #include <linux/fs.h>
 #include <linux/gfp_types.h>
 #include <linux/gpio/consumer.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
+#include <linux/uaccess.h>
+
+#include "stepper_motor.h"
 
 struct stepper_motor_device
 {
@@ -36,7 +41,26 @@ struct stepper_motor_device
     struct cdev cdev;
     struct class *class;
     struct mutex lock;
+
+    /* Stepping */
+    struct hrtimer timer;
+    bool stepping;          // Whether we are presently stepping.
+    bool step_pin_state;    // Logical (HIGH/LOW) state of the STEP pin
+    unsigned int remaining; // Remaining steps
+    ktime_t step_period;    // Interrval between pulses
+    stepper_direction direction;
 };
+
+/**
+ * @brief Function to start a movement given the parametes for the move.
+ *
+ * @param sd Device private data
+ * @param movement destired movement
+ */
+static void stepper_move(struct stepper_motor_device *sd, struct stepdrv_move movement)
+{
+    dev_info(sd->dev, "Performing movement of stepper motor\n");
+}
 
 /**
  * @brief IOCTL handler for the driver
@@ -56,6 +80,25 @@ static long stepper_ioctl(struct file *file, unsigned int cmd, unsigned long arg
     // Handle the respective IOCTL cmd
     switch (cmd)
     {
+    case STEPDRV_IOC_MOVE: {
+        struct stepdrv_move mv;
+        if (copy_from_user(&mv, (void __user *)arg, sizeof(mv)))
+        {
+            dev_err(sd->dev, "Unable to copy user provided argument to kernel space");
+            ret = -EFAULT;
+            break;
+        }
+        stepper_move(sd, mv);
+        break;
+    }
+    case STEPDRV_IOC_STOP: {
+        sd->stepping = false;
+        sd->remaining = 0;
+        // Set STEP low to be safe
+        if (sd->step_gpiod)
+            gpiod_set_value(sd->step_gpiod, 0);
+        break;
+    }
     default:
         ret = -ENOTTY;
         break;
