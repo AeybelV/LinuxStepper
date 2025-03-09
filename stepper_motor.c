@@ -64,12 +64,12 @@ static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer);
 static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer)
 {
     struct stepper_motor_device *sd = container_of(timer, struct stepper_motor_device, timer);
-    dev_info(sd->dev, "Timer callback\n");
+    dev_dbg(sd->dev, "Timer callback\n");
 
     // If we stopped stepping through a halt or run out remaining steps, we are done
     if (!sd->stepping || (sd->remaining == 0))
     {
-        dev_info(sd->dev, "Completed movement\n");
+        dev_dbg(sd->dev, "Completed movement\n");
         sd->stepping = false;
         wake_up_interruptible(&sd->waitq);
         // Makes sure STEP is driven low
@@ -105,7 +105,7 @@ static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer)
  */
 static int stepper_move(struct stepper_motor_device *sd, struct stepdrv_move movement)
 {
-    dev_info(sd->dev, "Performing movement of stepper motor\n");
+    dev_dbg(sd->dev, "Performing movement of stepper motor\n");
 
     // Check if we have the required STEP/DIR lines
     if (!sd->step_gpiod || !sd->dir_gpiod)
