@@ -133,7 +133,7 @@ static int stepper_move(struct stepper_motor_device *sd, struct stepdrv_move mov
      *   - Therefore step period = 1 / speed (in seconds).
      *   - If speed=500 steps/sec => period=2ms => 2e6 ns
      */
-    unsigned long long period_ns = 1000000000ULL / speed_hz;
+    unsigned long long period_ns = 1000000000ULL / (speed_hz * 2);
     sd->step_period = ktime_set(0, period_ns);
 
     // Setup the move
@@ -391,6 +391,10 @@ static int stepper_remove(struct platform_device *pdev)
     struct stepper_motor_device *sd = platform_get_drvdata(pdev);
 
     // Clean up any stepping activity
+    sd->stepping = false;
+    sd->remaining = 0;
+    hrtimer_cancel(&sd->timer);
+    gpiod_set_value(sd->step_gpiod, 0);
 
     // remove char device
     stepper_destroy_cdev(sd);
