@@ -26,6 +26,7 @@
 #include <linux/platform_device.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
 
 #include "stepper_motor.h"
 
@@ -49,6 +50,7 @@ struct stepper_motor_device
     unsigned int remaining; // Remaining steps
     ktime_t step_period;    // Interrval between pulses
     stepper_direction direction;
+    wait_queue_head_t waitq; // A wait queue for having userspace  programs wait for a completed movement
 };
 
 static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer);
@@ -69,7 +71,7 @@ static enum hrtimer_restart stepper_timer_cb(struct hrtimer *timer)
     {
         dev_info(sd->dev, "Completed movement\n");
         sd->stepping = false;
-
+        wake_up_interruptible(&sd->waitq);
         // Makes sure STEP is driven low
         if (sd->step_gpiod)
             gpiod_set_value(sd->step_gpiod, 0);
@@ -212,6 +214,11 @@ static ssize_t stepper_read(struct file *file, char __user *buf, size_t count, l
     // Idk what i could use the read callback for. Maybe to have userspace apps read from the device, and the device
     // blocks until the stepper move operation is done? and if there is no movement in progess, it can return.
     // Doesnt actually return data, so itll just return 0 to inidicate a EOF
+    if (sd->stepping)
+    {
+        wait_event_interruptible(sd->waitq, !sd->stepping);
+    }
+
     return 0;
 }
 
@@ -376,6 +383,9 @@ static int stepper_probe(struct platform_device *pdev)
     hrtimer_init(&sd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_PINNED);
     sd->timer.function = stepper_timer_cb;
 
+    // Init the waitqueue
+    init_waitqueue_head(&sd->waitq);
+
     // Create char device node
     dev_info(sd->dev, "Creating char device node\n");
     ret = stepper_create_cdev(sd);
@@ -395,6 +405,7 @@ static int stepper_remove(struct platform_device *pdev)
     sd->remaining = 0;
     hrtimer_cancel(&sd->timer);
     gpiod_set_value(sd->step_gpiod, 0);
+    wake_up_interruptible(&sd->waitq);
 
     // remove char device
     stepper_destroy_cdev(sd);
